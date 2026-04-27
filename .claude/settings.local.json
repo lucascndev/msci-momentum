@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Command *)",
+      "PowerShell(python -c \"import pypdf; print\\(pypdf.__version__\\)\" 2>&1; python -c \"import pdfplumber; print\\(pdfplumber.__version__\\)\" 2>&1; python -c \"import PyPDF2; print\\(PyPDF2.__version__\\)\" 2>&1; python -c \"import fitz; print\\(fitz.__version__\\)\" 2>&1)",
+      "PowerShell(pip install *)",
+      "PowerShell(python -m pip install pypdf 2>&1 | Select-Object -Last 5)",
+      "Bash(mkdir -p /c/Users/lucas/projects/msci-momentum/scratch)",
+      "Bash(python -c ' *)",
+      "Bash(python *)",
+      "Bash(PYTHONPATH=src python -m pytest tests/ -v)",
+      "Bash(PYTHONPATH=src python -m msci_momentum.cli --date 2026-04-15 --top-n 20 --limit 10)",
+      "Bash(PYTHONPATH=src python -c \"from msci_momentum import build_portfolio, compute_momentum_scores, build_inputs_for_universe; print\\('imports ok'\\)\")",
+      "Bash(PYTHONPATH=src python -m pytest tests/ -q)",
+      "Bash(PYTHONPATH=src python -m msci_momentum.cli --date 2026-04-15 --top-n 100 --limit 15)",
+      "Bash(kill -0 1842)",
+      "Bash(PYTHONPATH=src python -m msci_momentum.cli --date 2026-04-15 --top-n 100 --ticker AAPL)",
+      "Bash(PYTHONPATH=src python -m msci_momentum.cli --date 2026-04-15 --top-n 100 --ticker NVDA)",
+      "Bash(PYTHONPATH=src python -m msci_momentum.cli --date 2026-04-15 --top-n 100 --ticker GOOGL)",
+      "Bash(.venv/Scripts/python.exe --version)",
+      "Bash(.venv/Scripts/pip.exe --version)",
+      "Bash(.venv/Scripts/pip.exe install *)",
+      "Bash(.venv/Scripts/momentum.exe --help)",
+      "Bash(.venv/Scripts/pytest.exe -q)",
+      "Bash(.venv/Scripts/momentum.exe --date 2026-04-15 --ticker GOOGL)",
+      "Bash(pip install *)"
+    ]
+  }
+}

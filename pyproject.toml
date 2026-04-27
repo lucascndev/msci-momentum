@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msci-momentum"
+version = "0.1.0"
+description = "Replicates the MSCI Momentum index methodology against a configurable equity universe."
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance>=0.2.40",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "lxml>=4.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+gui = ["streamlit>=1.32", "altair>=5.0"]
+site = ["plotly>=5.20", "jinja2>=3.1"]
+
+[project.scripts]
+momentum = "msci_momentum.cli:main"
+momentum-gui = "msci_momentum.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
