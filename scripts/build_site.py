@@ -25,14 +25,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.io as pio
 from jinja2 import Template
 
-from msci_momentum.data import fetch_market_caps, fetch_monthly_closes
-from msci_momentum.momentum import build_inputs_for_universe, compute_momentum_scores
-from msci_momentum.portfolio import build_portfolio
-from msci_momentum.universe import load_universe, tickers as universe_tickers
+from msci_momentum.pipeline import run_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
@@ -40,107 +35,314 @@ DATA = DOCS / "data"
 
 
 PAGE_TEMPLATE = Template(
-    """<!doctype html>
+    r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <title>MSCI Momentum — S&P 500 daily snapshot</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' fill='%231a1a1c'/><path d='M10 50 L24 36 L34 42 L54 14' fill='none' stroke='%23faf9f6' stroke-width='2.5' stroke-linecap='square'/><circle cx='54' cy='14' r='2.5' fill='%23faf9f6'/></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --paper: #faf9f6;
+    --paper-2: #f3f1ea;
+    --ink: #1a1a1c;
+    --ink-2: #3a3a3d;
+    --muted: #76767b;
+    --hairline: #e3e0d6;
+    --accent: #1f3a8a;
+    --accent-soft: #e9ecf6;
+    --gain: #166534;
+    --loss: #9c1d1d;
+    --serif: "Source Serif 4", Iowan Old Style, Georgia, serif;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0c0c0d;
+      --paper-2: #161618;
+      --ink: #f0eee8;
+      --ink-2: #d2d0c9;
+      --muted: #8a8a8f;
+      --hairline: #26262a;
+      --accent: #8aa4f0;
+      --accent-soft: #1d2138;
+      --gain: #4ade80;
+      --loss: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--paper); color: var(--ink); }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    max-width: 1200px; margin: 2rem auto; padding: 0 1.25rem;
-    line-height: 1.5;
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 4rem;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
   }
-  h1 { margin-bottom: 0.25rem; }
-  .sub { color: #666; margin-top: 0; }
-  .banner {
-    background: #fff8e1; border: 1px solid #f0d067; padding: 0.75rem 1rem;
-    border-radius: 6px; margin: 1.25rem 0; font-size: 0.92rem;
+  .num, .num * { font-feature-settings: "tnum"; font-variant-numeric: tabular-nums; }
+
+  /* MASTHEAD ------------------------------------------------------------- */
+  .masthead { padding-bottom: 1.75rem; border-bottom: 1px solid var(--hairline); margin-bottom: 1.5rem; }
+  .eyebrow {
+    font-family: var(--sans);
+    font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.6rem;
   }
-  @media (prefers-color-scheme: dark) {
-    .banner { background: #3a300d; border-color: #806810; color: #f5e7b0; }
+  .eyebrow .sep { margin: 0 0.5em; opacity: 0.5; }
+  h1.title {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(2.1rem, 4.5vw, 3.2rem);
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.5rem;
   }
-  .metrics { display: flex; gap: 2rem; flex-wrap: wrap; margin: 1rem 0 1.5rem; }
-  .metric { }
-  .metric .v { font-size: 1.6rem; font-weight: 600; }
-  .metric .k { color: #888; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; }
-  .controls { display: flex; gap: 1rem; align-items: center; margin: 1rem 0; flex-wrap: wrap; }
+  .dek {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 1.15rem;
+    color: var(--ink-2);
+    max-width: 56ch;
+    margin: 0;
+  }
+
+  /* TOOLBAR -------------------------------------------------------------- */
+  .toolbar {
+    display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--hairline);
+    margin-bottom: 1.5rem;
+    font-size: 13px;
+  }
+  .toolbar label { color: var(--muted); display: flex; align-items: center; gap: 0.5rem; }
+  .toolbar .spacer { flex: 1; }
   select, button {
-    font: inherit; padding: 0.4rem 0.7rem; border-radius: 4px;
-    border: 1px solid #ccc; background: white;
+    font: inherit; color: var(--ink); background: transparent;
+    border: 1px solid var(--hairline); border-radius: 2px;
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
   }
-  @media (prefers-color-scheme: dark) {
-    select, button { background: #222; color: #eee; border-color: #444; }
+  select:hover, button:hover { border-color: var(--ink-2); }
+  button { font-weight: 500; }
+  #freshness { color: var(--muted); }
+  #freshness .stale { color: var(--loss); }
+  #freshness .fresh { color: var(--gain); }
+
+  /* KPI STRIP ------------------------------------------------------------ */
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    border-top: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+    margin: 0 0 2.5rem;
   }
-  table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }
-  th, td { padding: 0.4rem 0.6rem; text-align: right; border-bottom: 1px solid #eee; }
-  th:first-child, td:first-child { text-align: left; }
-  th { cursor: pointer; user-select: none; background: #fafafa; }
-  @media (prefers-color-scheme: dark) {
-    th { background: #1a1a1a; } td, th { border-bottom-color: #333; }
+  @media (max-width: 720px) { .kpis { grid-template-columns: repeat(3, 1fr); } .kpi:nth-child(n+4) { border-top: 1px solid var(--hairline); } }
+  .kpi {
+    padding: 1rem 1.1rem;
+    border-right: 1px solid var(--hairline);
   }
-  th.sort-asc::after { content: " ▲"; color: #888; }
-  th.sort-desc::after { content: " ▼"; color: #888; }
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
-  @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } }
-  .chart { min-height: 360px; }
-  footer { margin-top: 3rem; color: #888; font-size: 0.85rem; }
+  .kpi:last-child { border-right: 0; }
+  .kpi .k { font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+  .kpi .v { font-family: var(--serif); font-size: 1.65rem; font-weight: 600; line-height: 1.1; margin-top: 0.35rem; font-feature-settings: "tnum"; font-variant-numeric: tabular-nums; }
+
+  /* SECTION HEADERS ------------------------------------------------------ */
+  section { margin: 0 0 3rem; }
+  .section-head { display: flex; align-items: baseline; gap: 1rem; margin: 0 0 1.25rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--hairline); }
+  .section-head h2 { font-family: var(--serif); font-weight: 600; font-size: 1.45rem; margin: 0; letter-spacing: -0.005em; }
+  .section-head .eyebrow { margin: 0; }
+  .section-head .note { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+  /* MOVERS --------------------------------------------------------------- */
+  .movers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
+  @media (max-width: 720px) { .movers { grid-template-columns: 1fr; } .mover-col + .mover-col { border-top: 1px solid var(--hairline); } }
+  .mover-col { padding: 0 1.25rem; border-right: 1px solid var(--hairline); }
+  .mover-col:first-child { padding-left: 0; }
+  .mover-col:last-child { padding-right: 0; border-right: 0; }
+  .mover-col h3 { font-family: var(--sans); font-weight: 500; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.6rem; }
+  .mover-col ul { list-style: none; padding: 0; margin: 0; }
+  .mover-col li { display: flex; justify-content: space-between; align-items: baseline; padding: 0.45rem 0; border-bottom: 1px solid var(--hairline); font-size: 14px; }
+  .mover-col li:last-child { border-bottom: 0; }
+  .mover-col .ticker { font-weight: 500; letter-spacing: 0.01em; }
+  .mover-col .delta { font-family: var(--mono); font-size: 13px; font-feature-settings: "tnum"; }
+  .mover-col .none { color: var(--muted); font-style: italic; padding: 0.45rem 0; }
+  .pos { color: var(--gain); } .neg { color: var(--loss); }
+
+  /* CHARTS --------------------------------------------------------------- */
+  .charts-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+  @media (max-width: 720px) { .charts-2col { grid-template-columns: 1fr; } }
+  .chart-block { display: flex; flex-direction: column; }
+  .chart-block .chart-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 0.5rem; }
+  .chart-block h3 { font-family: var(--serif); font-weight: 600; font-size: 1.05rem; margin: 0; }
+  .chart-block .meta { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .chart { min-height: 320px; }
+  .chart.tall { min-height: 380px; }
+
+  /* TABLE ---------------------------------------------------------------- */
+  .table-wrap { overflow-x: auto; }
+  table.holdings { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  table.holdings thead th {
+    position: sticky; top: 0; background: var(--paper); z-index: 1;
+    text-align: right; padding: 0.55rem 0.7rem;
+    font-weight: 500; color: var(--muted);
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    border-bottom: 1px solid var(--ink); cursor: pointer; user-select: none;
+    white-space: nowrap;
+  }
+  table.holdings thead th:first-child, table.holdings thead th:nth-child(2) { text-align: left; }
+  table.holdings thead th:hover { color: var(--ink); }
+  table.holdings th.sort-asc::after { content: " ↑"; color: var(--ink); }
+  table.holdings th.sort-desc::after { content: " ↓"; color: var(--ink); }
+  table.holdings tbody td {
+    padding: 0.45rem 0.7rem; text-align: right;
+    border-bottom: 1px solid var(--hairline);
+    font-feature-settings: "tnum"; font-variant-numeric: tabular-nums;
+  }
+  table.holdings tbody td:first-child { font-weight: 500; text-align: left; }
+  table.holdings tbody td:nth-child(2) { text-align: left; color: var(--muted); font-size: 12.5px; }
+  table.holdings tbody td.num { font-family: var(--mono); font-size: 13px; }
+  table.holdings tbody tr:hover td { background: var(--paper-2); }
+
+  /* FOOTNOTES ------------------------------------------------------------ */
+  .footnotes { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--hairline); color: var(--muted); font-size: 12.5px; line-height: 1.65; }
+  .footnotes p { margin: 0 0 0.5rem; max-width: 70ch; }
+  .footnotes b { color: var(--ink-2); font-weight: 600; }
+  .footnotes a { color: var(--ink-2); }
 </style>
 </head>
 <body>
 
-<h1>MSCI Momentum — S&amp;P 500 snapshot</h1>
-<p class="sub">Replication of MSCI Momentum methodology (July 2025). Universe: S&amp;P 500, used as a proxy for MSCI USA.</p>
+<header class="masthead">
+  <p class="eyebrow"><span id="eyebrow-date">Daily snapshot</span><span class="sep">·</span><span>S&amp;P 500 universe</span><span class="sep">·</span><span>USD</span></p>
+  <h1 class="title">MSCI Momentum</h1>
+  <p class="dek">A point-in-time replication of the MSCI Momentum index methodology, computed daily over the S&amp;P 500 as a proxy for MSCI USA.</p>
+</header>
 
-<div class="banner">
-  <strong>Caveat:</strong> uses full market cap, not free-float. Names with large
-  strategic holdings (founders, governments) will have inflated parent weight
-  versus the official MSCI index. See README for the full methodology coverage table.
-</div>
-
-<div class="controls">
-  <label>Snapshot:
+<div class="toolbar">
+  <label>Snapshot
     <select id="date-picker"></select>
   </label>
-  <button id="download-csv">Download portfolio CSV</button>
-  <span id="generated-at" style="color:#888;font-size:0.85rem"></span>
+  <button id="download-csv">Download CSV</button>
+  <span class="spacer"></span>
+  <span id="freshness"></span>
 </div>
 
-<div class="metrics" id="metrics"></div>
+<div class="kpis num" id="metrics"></div>
 
-<div class="charts">
-  <div id="weights-chart" class="chart"></div>
-  <div id="zscore-chart" class="chart"></div>
+<section id="movers-section" hidden>
+  <div class="section-head">
+    <p class="eyebrow">Day on day</p>
+    <h2>What changed</h2>
+    <span class="note">vs. previous snapshot</span>
+  </div>
+  <div class="movers" id="movers"></div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Composition</p>
+    <h2>Top weights and sectors</h2>
+  </div>
+  <div class="charts-2col">
+    <div class="chart-block">
+      <div class="chart-head"><h3>Top-25 weights</h3><span class="meta">Cap-bound names at issuer cap</span></div>
+      <div id="weights-chart" class="chart"></div>
+    </div>
+    <div class="chart-block">
+      <div class="chart-head"><h3>Sector breakdown</h3><span class="meta">% of portfolio</span></div>
+      <div id="sector-chart" class="chart"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Cross-section</p>
+    <h2>Z-score distribution</h2>
+    <span class="note">winsorized at ±3</span>
+  </div>
+  <div id="zscore-chart" class="chart tall"></div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Holdings</p>
+    <h2>Portfolio</h2>
+    <span class="note" id="holdings-count"></span>
+  </div>
+  <div class="table-wrap">
+    <table class="holdings" id="portfolio-table">
+      <thead><tr>
+        <th data-key="ticker">Ticker</th>
+        <th data-key="sector">Sector</th>
+        <th data-key="momentum_score">Score</th>
+        <th data-key="parent_weight">Parent wt</th>
+        <th data-key="raw_weight">Raw wt</th>
+        <th data-key="weight">Weight</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<div class="footnotes">
+  <p><b>Method.</b> MSCI Momentum methodology (July 2025) — risk-adjusted 6m and 12m returns, cross-sectional z-scores, 50/50 combination, ±3 winsorization, score-weighted parent caps, iterative 5% issuer cap aggregated across share classes.</p>
+  <p><b>Caveats.</b> Free-float is approximated from <code>yfinance</code>'s <code>floatShares</code> (continuous), not MSCI's banded Foreign Inclusion Factor. Cross-holdings are not deducted from float. Universe is today's S&amp;P 500 — not survivorship-bias corrected. Educational replication; not investment advice.</p>
+  <p>Generated {{ generated_at }} · prices &amp; metadata from yfinance.</p>
 </div>
-
-<h2>Portfolio</h2>
-<div style="overflow-x:auto;">
-  <table id="portfolio-table">
-    <thead><tr>
-      <th data-key="ticker">Ticker</th>
-      <th data-key="momentum_score">Score</th>
-      <th data-key="parent_weight">Parent wt</th>
-      <th data-key="raw_weight">Raw wt</th>
-      <th data-key="weight">Weight</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</div>
-
-<footer>
-  Generated {{ generated_at }} · data source: yfinance · methodology: MSCI Momentum Indexes (July 2025).
-  This is an educational replication, not investment advice.
-</footer>
 
 <script>
 const DATES = {{ dates_json }};
-const FALLBACK_DATE = {{ default_date_json }};
+const DEFAULT_DATE = {{ default_date_json }};
 
-function fmtPct(x) { return (x * 100).toFixed(3) + '%'; }
-function fmtNum(x, d=4) { return Number(x).toFixed(d); }
+const fmtPct = (x) => (x * 100).toFixed(2) + '%';
+const fmtPctSigned = (x) => (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + '%';
+const fmtNum = (x, d = 3) => Number(x).toFixed(d);
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return `${MONTHS[m - 1]} ${d}, ${y}`;
+}
+
+function theme() {
+  const css = getComputedStyle(document.documentElement);
+  const v = (n) => css.getPropertyValue(n).trim();
+  return {
+    ink: v('--ink'), ink2: v('--ink-2'),
+    muted: v('--muted'), hairline: v('--hairline'),
+    accent: v('--accent'), accentSoft: v('--accent-soft'),
+    gain: v('--gain'), loss: v('--loss'),
+    paper: v('--paper'),
+  };
+}
+
+function plotlyLayout(extra = {}) {
+  const t = theme();
+  return {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { family: '"Inter", system-ui, sans-serif', size: 12, color: t.ink2 },
+    margin: { t: 10, r: 10, b: 36, l: 56 },
+    xaxis: { gridcolor: t.hairline, zerolinecolor: t.hairline, linecolor: t.hairline, tickfont: { color: t.muted, size: 11 }, automargin: true },
+    yaxis: { gridcolor: t.hairline, zerolinecolor: t.hairline, linecolor: t.hairline, tickfont: { color: t.muted, size: 11 }, automargin: true },
+    showlegend: false,
+    hoverlabel: { bgcolor: t.paper, bordercolor: t.hairline, font: { color: t.ink, family: '"JetBrains Mono", monospace', size: 12 } },
+    ...extra,
+  };
+}
+
+const PLOTLY_CFG = { displayModeBar: false, responsive: true };
 
 async function loadSnapshot(date) {
   const res = await fetch(`data/${date}.json`, { cache: 'no-cache' });
@@ -148,49 +350,126 @@ async function loadSnapshot(date) {
   return res.json();
 }
 
+function freshnessLabel(generatedAt) {
+  const diffMs = Date.now() - new Date(generatedAt).getTime();
+  const hours = diffMs / 36e5;
+  if (hours < 1) return { text: 'updated just now', cls: 'fresh' };
+  if (hours < 36) return { text: `updated ${hours.toFixed(0)}h ago`, cls: 'fresh' };
+  return { text: `last updated ${(hours / 24).toFixed(1)}d ago`, cls: 'stale' };
+}
+
 function renderMetrics(snap) {
-  const el = document.getElementById('metrics');
   const sumW = snap.portfolio.reduce((s, r) => s + r.weight, 0);
-  el.innerHTML = `
-    <div class="metric"><div class="k">Universe</div><div class="v">${snap.universe_size}</div></div>
-    <div class="metric"><div class="k">Eligible</div><div class="v">${snap.eligible_size}</div></div>
-    <div class="metric"><div class="k">Selected</div><div class="v">${snap.portfolio.length}</div></div>
-    <div class="metric"><div class="k">Σ weight</div><div class="v">${fmtPct(sumW)}</div></div>
-    <div class="metric"><div class="k">Top-N target</div><div class="v">${snap.params.top_n}</div></div>
-    <div class="metric"><div class="k">Issuer cap</div><div class="v">${fmtPct(snap.params.issuer_cap)}</div></div>
-  `;
-  document.getElementById('generated-at').textContent = `Generated ${snap.generated_at}`;
+  document.getElementById('metrics').innerHTML = [
+    ['Universe', snap.universe_size],
+    ['Eligible', snap.eligible_size],
+    ['Float coverage', snap.float_coverage ?? '—'],
+    ['Selected', snap.portfolio.length],
+    ['Σ weight', fmtPct(sumW)],
+    ['Issuer cap', fmtPct(snap.params.issuer_cap)],
+  ].map(([k, v]) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+  const f = freshnessLabel(snap.generated_at);
+  document.getElementById('freshness').innerHTML = `<span class="${f.cls}">${f.text}</span>`;
+  document.getElementById('eyebrow-date').textContent = `Daily snapshot · ${fmtDate(snap.date)}`;
+  document.getElementById('holdings-count').textContent = `${snap.portfolio.length} names`;
 }
 
 function renderWeights(snap) {
+  const t = theme();
   const top = snap.portfolio.slice(0, 25);
+  const cap = snap.params.issuer_cap;
   Plotly.newPlot('weights-chart', [{
     type: 'bar',
     x: top.map(r => r.ticker),
     y: top.map(r => r.weight * 100),
-    marker: { color: '#4a90e2' },
-    hovertemplate: '%{x}<br>weight: %{y:.3f}%<extra></extra>',
-  }], {
-    title: 'Top-25 portfolio weights (%)',
-    margin: { t: 40, l: 50, r: 10, b: 80 },
-    yaxis: { title: 'weight (%)' },
-    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-  }, { displayModeBar: false, responsive: true });
+    marker: { color: top.map(r => Math.abs(r.weight - cap) < 1e-6 ? t.accent : t.ink2) },
+    customdata: top.map(r => [r.sector || '', r.momentum_score]),
+    hovertemplate: '<b>%{x}</b><br>weight  %{y:.2f}%<br>sector  %{customdata[0]}<br>score   %{customdata[1]:.3f}<extra></extra>',
+  }], plotlyLayout({
+    margin: { t: 6, r: 6, b: 70, l: 44 },
+    yaxis: { gridcolor: t.hairline, zerolinecolor: t.hairline, linecolor: t.hairline, tickfont: { color: t.muted, size: 11 }, ticksuffix: '%', automargin: true },
+    xaxis: { tickfont: { color: t.muted, size: 10 }, tickangle: -55, linecolor: t.hairline },
+    bargap: 0.35,
+  }), PLOTLY_CFG);
+}
+
+function renderSectors(snap) {
+  const t = theme();
+  const bySector = {};
+  for (const r of snap.portfolio) {
+    const s = r.sector || 'Unknown';
+    bySector[s] = (bySector[s] || 0) + r.weight;
+  }
+  const entries = Object.entries(bySector).sort((a, b) => a[1] - b[1]);  // ascending → bars grow upward
+  Plotly.newPlot('sector-chart', [{
+    type: 'bar', orientation: 'h',
+    x: entries.map(([, w]) => w * 100),
+    y: entries.map(([s]) => s),
+    text: entries.map(([, w]) => (w * 100).toFixed(1) + '%'),
+    textposition: 'outside',
+    textfont: { color: t.ink2, family: '"JetBrains Mono", monospace', size: 11 },
+    marker: { color: t.accent, opacity: 0.85 },
+    hovertemplate: '<b>%{y}</b><br>%{x:.2f}%<extra></extra>',
+    cliponaxis: false,
+  }], plotlyLayout({
+    margin: { t: 6, r: 60, b: 30, l: 130 },
+    xaxis: { showgrid: true, gridcolor: t.hairline, zeroline: false, tickfont: { color: t.muted, size: 10 }, ticksuffix: '%' },
+    yaxis: { showgrid: false, zeroline: false, tickfont: { color: t.ink2, size: 12 } },
+    bargap: 0.5,
+  }), PLOTLY_CFG);
 }
 
 function renderZHist(snap) {
+  const t = theme();
   Plotly.newPlot('zscore-chart', [{
     type: 'histogram',
     x: snap.z_winsorized,
-    nbinsx: 30,
-    marker: { color: '#7b9e89' },
-    hovertemplate: 'z ∈ %{x}<br>count: %{y}<extra></extra>',
-  }], {
-    title: 'Cross-sectional z-score (winsorized at ±3)',
-    margin: { t: 40, l: 50, r: 10, b: 50 },
-    xaxis: { title: 'z' }, yaxis: { title: 'count' },
-    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-  }, { displayModeBar: false, responsive: true });
+    nbinsx: 36,
+    marker: { color: t.accent, opacity: 0.85, line: { width: 0 } },
+    hovertemplate: 'z  %{x:.2f}<br>count  %{y}<extra></extra>',
+  }], plotlyLayout({
+    margin: { t: 6, r: 10, b: 40, l: 44 },
+    xaxis: { title: { text: '', font: { color: t.muted } }, gridcolor: t.hairline, zerolinecolor: t.ink2, zerolinewidth: 1, linecolor: t.hairline, tickfont: { color: t.muted, size: 11 } },
+    yaxis: { gridcolor: t.hairline, zerolinecolor: t.hairline, linecolor: t.hairline, tickfont: { color: t.muted, size: 11 }, title: { text: '', font: { color: t.muted } } },
+    bargap: 0.05,
+  }), PLOTLY_CFG);
+}
+
+function renderMovers(snap, prevSnap) {
+  const section = document.getElementById('movers-section');
+  const root = document.getElementById('movers');
+  if (!prevSnap) { section.hidden = true; root.innerHTML = ''; return; }
+  section.hidden = false;
+
+  const cur = new Map(snap.portfolio.map(r => [r.ticker, r.weight]));
+  const prev = new Map(prevSnap.portfolio.map(r => [r.ticker, r.weight]));
+
+  const entered = [...cur.keys()].filter(t => !prev.has(t));
+  const exited = [...prev.keys()].filter(t => !cur.has(t));
+
+  const deltas = [];
+  for (const [t, w] of cur) {
+    if (prev.has(t)) deltas.push({ ticker: t, delta: w - prev.get(t) });
+  }
+  deltas.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const moves = deltas.slice(0, 8);
+
+  const li = (left, right, cls = '') =>
+    `<li><span class="ticker">${left}</span><span class="delta ${cls}">${right}</span></li>`;
+  const col = (title, items, empty = 'No changes') => `
+    <div class="mover-col">
+      <h3>${title}</h3>
+      <ul>${items.length === 0 ? `<div class="none">${empty}</div>` : items.join('')}</ul>
+    </div>`;
+
+  root.innerHTML =
+    col(`Entered · ${entered.length}`,
+      entered.slice(0, 8).map(t => li(t, '+' + fmtPct(cur.get(t)), 'pos'))) +
+    col(`Exited · ${exited.length}`,
+      exited.slice(0, 8).map(t => li(t, '−' + fmtPct(prev.get(t)), 'neg'))) +
+    col('Largest moves',
+      moves.map(r => li(r.ticker, fmtPctSigned(r.delta), r.delta >= 0 ? 'pos' : 'neg')));
 }
 
 let currentSnap = null;
@@ -209,10 +488,11 @@ function renderTable() {
   tbody.innerHTML = rows.map(r => `
     <tr>
       <td>${r.ticker}</td>
-      <td>${fmtNum(r.momentum_score)}</td>
-      <td>${fmtPct(r.parent_weight)}</td>
-      <td>${fmtPct(r.raw_weight)}</td>
-      <td>${fmtPct(r.weight)}</td>
+      <td>${r.sector || ''}</td>
+      <td class="num">${fmtNum(r.momentum_score)}</td>
+      <td class="num">${fmtPct(r.parent_weight)}</td>
+      <td class="num">${fmtPct(r.raw_weight)}</td>
+      <td class="num">${fmtPct(r.weight)}</td>
     </tr>
   `).join('');
   document.querySelectorAll('#portfolio-table th').forEach(th => {
@@ -224,22 +504,18 @@ function renderTable() {
 document.querySelectorAll('#portfolio-table th').forEach(th => {
   th.addEventListener('click', () => {
     const key = th.dataset.key;
-    if (sortState.key === key) {
-      sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
-    } else {
-      sortState = { key, dir: key === 'ticker' ? 'asc' : 'desc' };
-    }
+    if (sortState.key === key) sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+    else sortState = { key, dir: (key === 'ticker' || key === 'sector') ? 'asc' : 'desc' };
     renderTable();
   });
 });
 
 document.getElementById('download-csv').addEventListener('click', () => {
   if (!currentSnap) return;
-  const rows = currentSnap.portfolio;
-  const header = ['ticker', 'momentum_score', 'parent_weight', 'raw_weight', 'weight'];
+  const header = ['ticker', 'sector', 'issuer', 'momentum_score', 'parent_weight', 'raw_weight', 'weight'];
   const csv = [header.join(',')]
-    .concat(rows.map(r => header.map(k => r[k]).join(',')))
-    .join('\\n');
+    .concat(currentSnap.portfolio.map(r => header.map(k => r[k] ?? '').join(',')))
+    .join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -247,18 +523,37 @@ document.getElementById('download-csv').addEventListener('click', () => {
   a.click(); URL.revokeObjectURL(url);
 });
 
+function rerenderCharts() {
+  if (!currentSnap) return;
+  renderWeights(currentSnap);
+  renderSectors(currentSnap);
+  renderZHist(currentSnap);
+}
+
 async function show(date) {
   try {
     currentSnap = await loadSnapshot(date);
     renderMetrics(currentSnap);
-    renderWeights(currentSnap);
-    renderZHist(currentSnap);
+    rerenderCharts();
     renderTable();
+
+    const idx = DATES.indexOf(date);
+    const prevDate = idx >= 0 && idx + 1 < DATES.length ? DATES[idx + 1] : null;
+    let prevSnap = null;
+    if (prevDate) { try { prevSnap = await loadSnapshot(prevDate); } catch {} }
+    renderMovers(currentSnap, prevSnap);
+
+    const url = new URL(window.location);
+    url.searchParams.set('date', date);
+    window.history.replaceState(null, '', url);
   } catch (e) {
     document.getElementById('metrics').innerHTML =
-      `<div class="metric"><div class="k">Error</div><div class="v">${e.message}</div></div>`;
+      `<div class="kpi"><div class="k">Error</div><div class="v" style="font-size:1rem">${e.message}</div></div>`;
   }
 }
+
+// Re-render charts when system theme flips so they pick up new CSS variables.
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rerenderCharts);
 
 (function init() {
   const sel = document.getElementById('date-picker');
@@ -266,9 +561,11 @@ async function show(date) {
     const o = document.createElement('option');
     o.value = d; o.textContent = d; sel.appendChild(o);
   });
-  sel.value = FALLBACK_DATE;
+  const urlDate = new URLSearchParams(window.location.search).get('date');
+  const start = (urlDate && DATES.includes(urlDate)) ? urlDate : DEFAULT_DATE;
+  sel.value = start;
   sel.addEventListener('change', () => show(sel.value));
-  show(sel.value);
+  show(start);
 })();
 </script>
 </body>
@@ -277,24 +574,16 @@ async function show(date) {
 )
 
 
-def run_pipeline(rebalance: pd.Timestamp, top_n: int, issuer_cap: float) -> dict:
-    members = load_universe("sp500")
-    tks = universe_tickers(members)
-
-    inputs = build_inputs_for_universe(tks, rebalance, country="USA", use_cache=True)
-    scores = compute_momentum_scores(inputs, use_only_6m=False)
-
-    monthly = fetch_monthly_closes(tks, rebalance, use_cache=True)
-    mcap = fetch_market_caps(tks, rebalance, monthly, use_cache=True)
-
-    eligible = scores["combined"].dropna().index.intersection(mcap.index)
-    scores_e = scores.loc[eligible]
-    mcap_e = mcap.loc[eligible]
-
-    portfolio = build_portfolio(
-        scores_e, parent_mcap=mcap_e, n=top_n, issuer_cap=issuer_cap or None
+def build_snapshot_dict(rebalance: pd.Timestamp, top_n: int, issuer_cap: float) -> dict:
+    snap = run_snapshot(
+        rebalance,
+        universe_name="sp500",
+        top_n=top_n,
+        issuer_cap=issuer_cap or None,
+        ad_hoc=False,
+        use_cache=True,
     )
-
+    portfolio = snap.portfolio
     portfolio_records = [
         {
             "ticker": str(idx),
@@ -302,20 +591,20 @@ def run_pipeline(rebalance: pd.Timestamp, top_n: int, issuer_cap: float) -> dict
             "parent_weight": float(row["parent_weight"]),
             "raw_weight": float(row["raw_weight"]),
             "weight": float(row["weight"]),
+            "sector": str(row.get("sector", "Unknown")),
+            "issuer": str(row.get("issuer", idx)),
         }
         for idx, row in portfolio.iterrows()
     ]
-    z_winsorized = (
-        scores["z_winsorized"].dropna().astype(float).round(4).tolist()
-    )
     return {
-        "date": rebalance.strftime("%Y-%m-%d"),
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "params": {"top_n": top_n, "issuer_cap": issuer_cap, "universe": "sp500"},
-        "universe_size": len(tks),
-        "eligible_size": int(len(eligible)),
+        "date": snap.date.strftime("%Y-%m-%d"),
+        "generated_at": snap.generated_at.isoformat(timespec="seconds"),
+        "params": snap.params,
+        "universe_size": snap.universe_size,
+        "eligible_size": snap.eligible_size,
+        "float_coverage": snap.float_coverage,
         "portfolio": portfolio_records,
-        "z_winsorized": z_winsorized,
+        "z_winsorized": snap.z_winsorized.astype(float).round(4).tolist(),
     }
 
 
@@ -362,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.date
         else pd.Timestamp(datetime.now(timezone.utc).date())
     )
-    snapshot = run_pipeline(rebalance, args.top_n, args.issuer_cap)
+    snapshot = build_snapshot_dict(rebalance, args.top_n, args.issuer_cap)
     snap_path = write_snapshot(snapshot)
     dates = write_index()
     html_path = write_html(dates, snapshot["date"])

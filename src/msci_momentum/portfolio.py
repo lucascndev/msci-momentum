@@ -58,13 +58,23 @@ def momentum_weights(
 
 
 def apply_issuer_cap(
-    weights: pd.Series, cap: float = 0.05, max_iter: int = 100
+    weights: pd.Series,
+    cap: float = 0.05,
+    max_iter: int = 100,
+    issuer_map: dict[str, str] | None = None,
 ) -> pd.Series:
-    """Iteratively cap any single weight at ``cap`` and redistribute excess.
+    """Iteratively cap aggregate-issuer weight at ``cap`` and redistribute.
 
     For broad regional/country indexes MSCI uses a 5% issuer cap (Appendix II).
-    We treat each ticker as its own issuer — fine for v1; multi-class issuers
-    would need a separate issuer mapping.
+    The cap is applied at the *issuer* level: an issuer with multiple share
+    classes (GOOG/GOOGL, FOX/FOXA, NWS/NWSA) is summed across classes before
+    comparing to the cap. When an issuer is over the cap, the excess is taken
+    proportionally from its share classes and redistributed to non-capped
+    *issuers* (proportional to their current issuer-level weight).
+
+    ``issuer_map`` maps ticker -> issuer ID. Tickers absent from the map map
+    to themselves (single-class issuer, the common case). When ``None``,
+    every ticker is its own issuer (legacy behavior).
     """
     if weights.empty:
         return weights
@@ -73,28 +83,44 @@ def apply_issuer_cap(
         return w
     w = w / w.sum()
 
-    if cap * len(w) < 1.0 - 1e-12:
-        # Infeasible: even if every name were at the cap, total < 100%.
-        # MSCI's cap algorithm assumes enough names to absorb capped excess;
-        # we surface the issue rather than oscillate.
+    issuers = pd.Series(
+        {t: (issuer_map or {}).get(t, t) for t in w.index},
+        index=w.index,
+        name="issuer",
+    )
+    n_issuers = issuers.nunique()
+
+    if cap * n_issuers < 1.0 - 1e-12:
         raise ValueError(
-            f"Issuer cap {cap:.2%} infeasible for {len(w)} names "
-            f"(max coverage {cap * len(w):.1%}); raise the cap or grow the universe"
+            f"Issuer cap {cap:.2%} infeasible for {n_issuers} issuers "
+            f"(max coverage {cap * n_issuers:.1%}); raise the cap or grow the universe"
         )
 
     for _ in range(max_iter):
-        over = w > cap + 1e-12
+        issuer_w = w.groupby(issuers).sum()
+        over = issuer_w > cap + 1e-12
         if not over.any():
             break
-        excess = (w[over] - cap).sum()
-        w.loc[over] = cap
-        room = w[~over]
-        if room.sum() <= 0:
-            # Everyone is at the cap — proportional redistribution impossible.
-            break
-        w.loc[~over] = room + excess * (room / room.sum())
 
-    # Guard against drift from the loop.
+        # For each over-cap issuer: scale its share classes down so the
+        # issuer total equals cap. Excess is the amount removed.
+        excess_total = 0.0
+        for iss in issuer_w[over].index:
+            members = issuers[issuers == iss].index
+            cur = w.loc[members].sum()
+            scale = cap / cur
+            removed = w.loc[members].sum() - w.loc[members].sum() * scale
+            w.loc[members] = w.loc[members] * scale
+            excess_total += removed
+
+        # Redistribute excess to non-capped issuers' tickers, proportional to
+        # current weights within those issuers.
+        room_mask = ~issuers.isin(issuer_w[over].index)
+        room = w[room_mask]
+        if room.sum() <= 0:
+            break
+        w.loc[room_mask] = room + excess_total * (room / room.sum())
+
     s = w.sum()
     if s > 0:
         w = w / s
@@ -106,8 +132,9 @@ def build_portfolio(
     parent_mcap: pd.Series,
     n: int,
     issuer_cap: float | None = 0.05,
+    issuer_map: dict[str, str] | None = None,
 ) -> pd.DataFrame:
-    """End-to-end: select top-N, weight, optionally cap.
+    """End-to-end: select top-N, weight, optionally cap (issuer-aware).
 
     Returns a DataFrame indexed by ticker with columns:
       momentum_score, parent_weight, raw_weight, weight
@@ -120,7 +147,11 @@ def build_portfolio(
     parent_w = sub_parent / sub_parent.sum()
     raw = sub_scores["momentum_score"] * parent_w
     raw_norm = raw / raw.sum() if raw.sum() else raw
-    final = apply_issuer_cap(raw_norm, cap=issuer_cap) if issuer_cap else raw_norm
+    final = (
+        apply_issuer_cap(raw_norm, cap=issuer_cap, issuer_map=issuer_map)
+        if issuer_cap
+        else raw_norm
+    )
 
     return pd.DataFrame(
         {

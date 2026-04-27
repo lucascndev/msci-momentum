@@ -8,10 +8,7 @@ import sys
 
 import pandas as pd
 
-from msci_momentum.data import fetch_market_caps, fetch_monthly_closes
-from msci_momentum.momentum import build_inputs_for_universe, compute_momentum_scores
-from msci_momentum.portfolio import build_portfolio
-from msci_momentum.universe import load_universe, tickers as universe_tickers
+from msci_momentum.pipeline import run_snapshot
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -77,38 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     rebalance = pd.Timestamp(args.date) if args.date else pd.Timestamp.today().normalize()
-    members = load_universe(args.universe)
-    tks = universe_tickers(members)
 
-    print(
-        f"# Universe: {args.universe} ({len(tks)} tickers)  "
-        f"Rebalance: {rebalance.date()}  Top-N: {args.top_n}  "
-        f"Cap: {args.issuer_cap:.0%}",
-        file=sys.stderr,
-    )
-
-    inputs = build_inputs_for_universe(
-        tks,
+    snap = run_snapshot(
         rebalance,
-        country="USA",
+        universe_name=args.universe,
+        top_n=args.top_n,
+        issuer_cap=args.issuer_cap or None,
+        ad_hoc=args.ad_hoc,
         use_cache=not args.no_cache,
     )
-    scores = compute_momentum_scores(inputs, use_only_6m=args.ad_hoc)
+    portfolio = snap.portfolio
+    scores = snap.scores
 
-    monthly = fetch_monthly_closes(tks, rebalance, use_cache=not args.no_cache)
-    mcap = fetch_market_caps(tks, rebalance, monthly, use_cache=not args.no_cache)
-
-    # Restrict to names that have a Momentum value (per spec: "In the absence
-    # of Momentum value, security is not considered for inclusion").
-    eligible = scores["combined"].dropna().index.intersection(mcap.index)
-    scores = scores.loc[eligible]
-    mcap = mcap.loc[eligible]
-
-    portfolio = build_portfolio(
-        scores,
-        parent_mcap=mcap,
-        n=args.top_n,
-        issuer_cap=args.issuer_cap or None,
+    print(
+        f"# Universe: {args.universe} ({snap.universe_size} tickers)  "
+        f"Rebalance: {rebalance.date()}  Top-N: {args.top_n}  "
+        f"Cap: {args.issuer_cap:.0%}  "
+        f"Float coverage: {snap.float_coverage}/{snap.universe_size}",
+        file=sys.stderr,
     )
 
     if args.ticker:

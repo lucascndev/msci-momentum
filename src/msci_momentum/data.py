@@ -113,56 +113,97 @@ def fetch_weekly_closes(
     return df
 
 
+def fetch_security_metadata(
+    tickers: list[str],
+    rebalance_date: pd.Timestamp,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Per-ticker static metadata: shares, float shares, sector.
+
+    Returns a DataFrame indexed by ticker with columns:
+      shares_outstanding, float_shares, sector
+
+    yfinance's ``Ticker.info`` is rate-limited; we cache once per rebalance date.
+    Cache file is keyed by date + ticker hash.
+    """
+    cache = _cache_path(
+        f"meta_{pd.Timestamp(rebalance_date).date()}_{_ticker_hash(tickers)}.csv"
+    )
+    if use_cache and cache.exists():
+        return pd.read_csv(cache, index_col=0)
+
+    rows: dict[str, dict] = {}
+    failed: list[str] = []
+    for i, tk in enumerate(tickers, 1):
+        info: dict | None = None
+        for attempt in range(3):
+            try:
+                info = yf.Ticker(tk).get_info()
+                break
+            except Exception as e:  # noqa: BLE001
+                log.debug("info attempt %d failed for %s: %s", attempt + 1, tk, e)
+                time.sleep(0.5 * (attempt + 1))
+        if info:
+            so = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+            fs = info.get("floatShares")
+            sec = info.get("sector")
+            rows[tk] = {
+                "shares_outstanding": float(so) if so else np.nan,
+                "float_shares": float(fs) if fs else np.nan,
+                "sector": sec if sec else "Unknown",
+            }
+        else:
+            failed.append(tk)
+        if i % 50 == 0:
+            log.info("metadata: %d/%d fetched", i, len(tickers))
+        time.sleep(0.05)
+    if failed:
+        log.warning("metadata unavailable for %d tickers: %s",
+                    len(failed), failed[:10])
+    meta = pd.DataFrame.from_dict(rows, orient="index")
+    if not meta.empty:
+        meta.index.name = "ticker"
+        meta.to_csv(cache)
+    return meta
+
+
 def fetch_market_caps(
     tickers: list[str],
     rebalance_date: pd.Timestamp,
     monthly_closes: pd.DataFrame,
     use_cache: bool = True,
+    use_float: bool = True,
 ) -> pd.Series:
-    """Approximate market cap = shares_outstanding * price at rebalance_date.
+    """Market cap at rebalance date.
 
-    yfinance's ``Ticker.info`` is rate-limited and slow; we cache the share count
-    once per rebalance date.
+    With ``use_float=True`` (default), uses ``float_shares`` × price as a
+    free-float-mcap approximation, matching MSCI's float-weighted mcap intent.
+    Falls back to ``shares_outstanding`` × price for names where yfinance
+    doesn't return ``floatShares`` (typical: a few percent of a 500-name run).
+
+    With ``use_float=False`` we use full shares outstanding (legacy v1
+    behavior — kept so tests and ad-hoc inspection can compare).
     """
-    cache = _cache_path(
-        f"shares_{pd.Timestamp(rebalance_date).date()}_{_ticker_hash(tickers)}.csv"
-    )
-    if use_cache and cache.exists():
-        shares = pd.read_csv(cache, index_col=0).iloc[:, 0]
-    else:
-        rows: dict[str, float] = {}
-        failed: list[str] = []
-        for i, tk in enumerate(tickers, 1):
-            so = None
-            for attempt in range(3):
-                try:
-                    info = yf.Ticker(tk).get_info()
-                    so = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
-                    break
-                except Exception as e:  # noqa: BLE001
-                    log.debug("info attempt %d failed for %s: %s", attempt + 1, tk, e)
-                    time.sleep(0.5 * (attempt + 1))
-            if so:
-                rows[tk] = float(so)
-            else:
-                failed.append(tk)
-            if i % 50 == 0:
-                log.info("market caps: %d/%d fetched", i, len(tickers))
-            time.sleep(0.05)  # gentle pacing
-        if failed:
-            log.warning("market cap unavailable for %d tickers: %s",
-                        len(failed), failed[:10])
-        shares = pd.Series(rows, name="shares_outstanding")
-        shares.to_csv(cache)
+    meta = fetch_security_metadata(tickers, rebalance_date, use_cache=use_cache)
+    if meta.empty:
+        raise ValueError("No metadata returned for any ticker")
 
-    # Pick the most recent monthly close at or before the rebalance date.
+    if use_float:
+        # Prefer float_shares; fall back to shares_outstanding when null.
+        shares = meta["float_shares"].where(
+            meta["float_shares"].notna() & (meta["float_shares"] > 0),
+            meta["shares_outstanding"],
+        )
+    else:
+        shares = meta["shares_outstanding"]
+
     rb = pd.Timestamp(rebalance_date)
     monthly = monthly_closes.loc[monthly_closes.index <= rb]
     if monthly.empty:
         raise ValueError(f"No monthly prices on/before {rb.date()}")
     last_price = monthly.iloc[-1]
 
-    common = shares.index.intersection(last_price.index)
+    common = shares.dropna().index.intersection(last_price.index)
     mcap = (shares.loc[common] * last_price.loc[common]).dropna()
     mcap.name = "market_cap"
     return mcap

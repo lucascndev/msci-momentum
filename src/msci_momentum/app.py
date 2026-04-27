@@ -13,10 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from msci_momentum.data import fetch_market_caps, fetch_monthly_closes
-from msci_momentum.momentum import build_inputs_for_universe, compute_momentum_scores
-from msci_momentum.portfolio import build_portfolio
-from msci_momentum.universe import load_universe, tickers as universe_tickers
+from msci_momentum.pipeline import run_snapshot
 
 
 @st.cache_data(show_spinner=False)
@@ -28,33 +25,20 @@ def _run_pipeline(
     ad_hoc: bool,
     use_cache: bool,
 ) -> dict:
-    rebalance = pd.Timestamp(rebalance_iso)
-    members = load_universe(universe_name)
-    tks = universe_tickers(members)
-
-    inputs = build_inputs_for_universe(
-        tks, rebalance, country="USA", use_cache=use_cache
-    )
-    scores = compute_momentum_scores(inputs, use_only_6m=ad_hoc)
-
-    monthly = fetch_monthly_closes(tks, rebalance, use_cache=use_cache)
-    mcap = fetch_market_caps(tks, rebalance, monthly, use_cache=use_cache)
-
-    eligible = scores["combined"].dropna().index.intersection(mcap.index)
-    scores_eligible = scores.loc[eligible]
-    mcap_eligible = mcap.loc[eligible]
-
-    portfolio = build_portfolio(
-        scores_eligible,
-        parent_mcap=mcap_eligible,
-        n=top_n,
+    snap = run_snapshot(
+        pd.Timestamp(rebalance_iso),
+        universe_name=universe_name,
+        top_n=top_n,
         issuer_cap=issuer_cap or None,
+        ad_hoc=ad_hoc,
+        use_cache=use_cache,
     )
     return {
-        "universe_size": len(tks),
-        "eligible_size": len(eligible),
-        "scores": scores,
-        "portfolio": portfolio,
+        "universe_size": snap.universe_size,
+        "eligible_size": snap.eligible_size,
+        "float_coverage": snap.float_coverage,
+        "scores": snap.scores,
+        "portfolio": snap.portfolio,
     }
 
 
@@ -108,11 +92,12 @@ def _render():
     portfolio: pd.DataFrame = result["portfolio"]
     scores: pd.DataFrame = result["scores"]
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Universe", result["universe_size"])
-    c2.metric("Eligible (has Momentum)", result["eligible_size"])
-    c3.metric("Selected", len(portfolio))
-    c4.metric("Σ weight", f"{portfolio['weight'].sum():.2%}")
+    c2.metric("Eligible", result["eligible_size"])
+    c3.metric("Float coverage", result["float_coverage"])
+    c4.metric("Selected", len(portfolio))
+    c5.metric("Σ weight", f"{portfolio['weight'].sum():.2%}")
 
     if ticker_filter:
         st.subheader(f"Ticker: {ticker_filter}")

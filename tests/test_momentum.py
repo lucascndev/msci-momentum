@@ -163,6 +163,29 @@ def test_apply_issuer_cap_no_op_when_under_cap():
     assert (out <= 0.95 + 1e-9).all()
 
 
+def test_apply_issuer_cap_aggregates_dual_class():
+    # GOOGL and GOOG belong to one issuer; together at 8% they exceed the 5% cap.
+    raw = {f"S{i}": 0.92 / 28 for i in range(28)}
+    raw["GOOGL"] = 0.05
+    raw["GOOG"] = 0.03
+    w = pd.Series(raw)
+    issuer_map = {"GOOGL": "ALPHABET", "GOOG": "ALPHABET"}
+    out = apply_issuer_cap(w, cap=0.05, issuer_map=issuer_map)
+    # Issuer-level Alphabet weight must be at the cap, not 2× the cap.
+    assert out["GOOGL"] + out["GOOG"] == pytest.approx(0.05, abs=1e-9)
+    # The two share classes preserve their relative ratio (5:3).
+    assert out["GOOGL"] / out["GOOG"] == pytest.approx(5 / 3, rel=1e-6)
+    assert out.sum() == pytest.approx(1.0)
+
+
+def test_apply_issuer_cap_infeasible_uses_issuer_count_not_ticker_count():
+    # 3 tickers but only 2 issuers @ 5% cap → can hold max 10%, infeasible.
+    w = pd.Series({"GOOGL": 0.4, "GOOG": 0.3, "MSFT": 0.3})
+    issuer_map = {"GOOGL": "ALPHABET", "GOOG": "ALPHABET"}
+    with pytest.raises(ValueError, match="infeasible"):
+        apply_issuer_cap(w, cap=0.05, issuer_map=issuer_map)
+
+
 def test_build_portfolio_end_to_end():
     inputs = _toy_inputs()
     scores = compute_momentum_scores(inputs)
