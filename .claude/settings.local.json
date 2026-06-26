@@ -23,7 +23,11 @@
       "Bash(.venv/Scripts/momentum.exe --help)",
       "Bash(.venv/Scripts/pytest.exe -q)",
       "Bash(.venv/Scripts/momentum.exe --date 2026-04-15 --ticker GOOGL)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(python3 *)",
+      "Bash(pip3 show *)",
+      "Bash(pip3 install *)",
+      "Bash(PYTHONPATH=src python3 *)"
     ]
   }
 }

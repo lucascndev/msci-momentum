@@ -39,12 +39,17 @@ def _ticker_hash(tickers: list[str]) -> str:
     return h[:10]
 
 
-def _download(
+_DOWNLOAD_BATCH_SIZE = 100
+_DOWNLOAD_BATCH_DELAY = 1.5  # seconds between batches
+
+
+def _download_batch(
     tickers: list[str],
     start: pd.Timestamp,
     end: pd.Timestamp,
     interval: str,
 ) -> pd.DataFrame:
+    """Download closes for one batch of tickers; returns empty DataFrame on failure."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         raw = yf.download(
@@ -62,19 +67,55 @@ def _download(
         return pd.DataFrame()
 
     if isinstance(raw.columns, pd.MultiIndex):
-        # group_by="ticker" → outer level is ticker, inner is OHLCV.
-        closes = {}
-        for tk in tickers:
-            if tk in raw.columns.get_level_values(0):
-                series = raw[tk].get("Close")
-                if series is not None:
-                    closes[tk] = series
-        df = pd.DataFrame(closes)
+        lvl0 = raw.columns.get_level_values(0).unique()
+        if "Close" in lvl0:
+            # yfinance (Price, Ticker) layout: outer = price type, inner = ticker
+            df = raw["Close"].copy()
+        else:
+            # yfinance (Ticker, Price) layout: outer = ticker, inner = price type
+            closes = {}
+            for tk in tickers:
+                if tk in lvl0:
+                    series = raw[tk].get("Close")
+                    if series is not None:
+                        closes[tk] = series
+            df = pd.DataFrame(closes)
     else:
         df = raw[["Close"]].rename(columns={"Close": tickers[0]})
 
     df.index = pd.to_datetime(df.index).tz_localize(None)
-    return df.sort_index()
+    df = df.sort_index()
+    # Drop tickers that came back entirely NaN (failed / rate-limited)
+    all_nan = df.columns[df.isna().all()]
+    if len(all_nan):
+        log.warning("Dropping %d all-NaN tickers: %s", len(all_nan), list(all_nan[:10]))
+    df = df.dropna(axis=1, how="all")
+    return df
+
+
+def _download(
+    tickers: list[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    interval: str,
+) -> pd.DataFrame:
+    if len(tickers) <= _DOWNLOAD_BATCH_SIZE:
+        return _download_batch(tickers, start, end, interval)
+
+    frames: list[pd.DataFrame] = []
+    for i in range(0, len(tickers), _DOWNLOAD_BATCH_SIZE):
+        batch = tickers[i : i + _DOWNLOAD_BATCH_SIZE]
+        df = _download_batch(batch, start, end, interval)
+        if not df.empty:
+            frames.append(df)
+        if i + _DOWNLOAD_BATCH_SIZE < len(tickers):
+            time.sleep(_DOWNLOAD_BATCH_DELAY)
+
+    if not frames:
+        return pd.DataFrame()
+    result = pd.concat(frames, axis=1)
+    result = result.loc[~result.index.duplicated(keep="first")]
+    return result.sort_index()
 
 
 def fetch_monthly_closes(
