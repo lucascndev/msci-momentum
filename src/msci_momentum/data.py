@@ -272,3 +272,61 @@ def month_end_closes_at_offset(
     row = cutoff.iloc[idx].copy()
     row.name = f"P_T-{months_back}"
     return row
+
+
+def project_monthly_to_month_end(
+    monthly: pd.DataFrame,
+    as_of: pd.Timestamp,
+    latest_close: pd.Series | None = None,
+    months_ahead: int = 1,
+) -> tuple[pd.DataFrame, pd.Timestamp]:
+    """Append placeholder month-end rows to preview a future rebalance.
+
+    On any day inside a month the live snapshot anchors on the last *settled*
+    month-end. A future rebalance anchors further ahead. We append month-end rows
+    from the current month-end up to the target so the 1/7/13 lookback shifts
+    forward exactly as it will at that rebalance, then anchor on the target.
+
+    ``months_ahead`` selects the horizon (1 = the imminent rebalance at the
+    current month-end; 2 = the one after, etc.). The target is
+    ``as_of + MonthEnd(months_ahead - 1)``.
+
+    Provisionality depends on the horizon, because P_{T-1} for the target is the
+    month-end one step before it:
+
+      * ``months_ahead=1``  -> P_{T-1} is the last *settled* month-end. The
+        appended current-month row sits in the unused T-0 slot and is never read,
+        so the projected momentum is EXACT regardless of its value.
+      * ``months_ahead>=2`` -> P_{T-1} is the *current* (in-progress) month-end,
+        which we fill with ``latest_close`` as a genuine proxy. This projection
+        is provisional and firms up as the month closes.
+
+    Returns ``(augmented_monthly, target_month_end)``.
+    """
+    as_of = pd.Timestamp(as_of)
+    monthly = monthly.sort_index()
+    current_me = as_of + pd.offsets.MonthEnd(0)  # end of the month containing as_of
+    # Step cleanly from a month-end (mid-month offset stepping is inconsistent).
+    target = current_me + pd.offsets.MonthEnd(months_ahead - 1)
+    month_start = current_me.replace(day=1)
+
+    if latest_close is None:
+        upto = monthly.loc[monthly.index <= current_me]
+        if upto.empty:
+            raise ValueError(f"No monthly bars at or before {current_me.date()}")
+        # ffill so a ticker whose latest bar is stale still carries its last print.
+        latest_close = upto.ffill().iloc[-1]
+
+    # Drop any bar already inside the current month (a partial yfinance bar) so
+    # the appended rows are the sole representatives of the current month onward.
+    settled = monthly.loc[monthly.index < month_start]
+    new_index = pd.date_range(current_me, target, freq="ME")
+    row = latest_close.reindex(monthly.columns).to_numpy()
+    added = pd.DataFrame(
+        np.tile(row, (len(new_index), 1)),
+        index=new_index,
+        columns=monthly.columns,
+    )
+    augmented = pd.concat([settled, added])
+    augmented.index.name = monthly.index.name
+    return augmented, target

@@ -28,6 +28,7 @@ import pandas as pd
 from jinja2 import Template
 
 from msci_momentum.pipeline import run_snapshot
+from msci_momentum.preview import diff_snapshots
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
@@ -179,6 +180,28 @@ PAGE_TEMPLATE = Template(
   .mover-col .none { color: var(--muted); font-style: italic; padding: 0.45rem 0; }
   .pos { color: var(--gain); } .neg { color: var(--loss); }
 
+  /* PREVIEW (next-rebalance projection) ---------------------------------- */
+  .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  @media (max-width: 720px) { .preview-grid { grid-template-columns: 1fr; } .horizon + .horizon { border-top: 1px solid var(--hairline); border-left: 0; } }
+  .horizon { padding: 0 1.5rem; }
+  .horizon:first-child { padding-left: 0; }
+  .horizon:last-child { padding-right: 0; border-left: 1px solid var(--hairline); }
+  .horizon .hz-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.2rem; }
+  .horizon .hz-when { font-family: var(--serif); font-weight: 600; font-size: 1.1rem; }
+  .horizon .hz-sub { color: var(--muted); font-size: 12px; margin: 0 0 1rem; }
+  .badge { font-family: var(--sans); font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; padding: 0.14rem 0.45rem; border-radius: 2px; border: 1px solid currentColor; }
+  .badge.exact { color: var(--gain); }
+  .badge.prov { color: var(--accent); }
+  .hz-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+  @media (max-width: 480px) { .hz-cols { grid-template-columns: 1fr; } }
+  .hz-cols h4 { font-family: var(--sans); font-weight: 500; font-size: 10.5px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.4rem; }
+  .hz-cols ul { list-style: none; padding: 0; margin: 0; }
+  .hz-cols li { display: flex; justify-content: space-between; align-items: baseline; padding: 0.35rem 0; border-bottom: 1px solid var(--hairline); font-size: 13.5px; }
+  .hz-cols li:last-child { border-bottom: 0; }
+  .hz-cols .ticker { font-weight: 500; }
+  .hz-cols .wt { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .hz-cols .none { color: var(--muted); font-style: italic; font-size: 13px; padding: 0.35rem 0; }
+
   /* CHARTS --------------------------------------------------------------- */
   .charts-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
   @media (max-width: 720px) { .charts-2col { grid-template-columns: 1fr; } }
@@ -247,6 +270,15 @@ PAGE_TEMPLATE = Template(
     <span class="note">vs. previous snapshot</span>
   </div>
   <div class="movers" id="movers"></div>
+</section>
+
+<section id="preview-section" hidden>
+  <div class="section-head">
+    <p class="eyebrow">Looking ahead</p>
+    <h2>Next rebalances</h2>
+    <span class="note" id="preview-note"></span>
+  </div>
+  <div class="preview-grid" id="preview"></div>
 </section>
 
 <section>
@@ -472,6 +504,43 @@ function renderMovers(snap, prevSnap) {
       moves.map(r => li(r.ticker, fmtPctSigned(r.delta), r.delta >= 0 ? 'pos' : 'neg')));
 }
 
+function renderPreview(snap) {
+  const section = document.getElementById('preview-section');
+  const root = document.getElementById('preview');
+  const pv = snap.preview;
+  if (!pv) { section.hidden = true; root.innerHTML = ''; return; }
+  section.hidden = false;
+  document.getElementById('preview-note').textContent = `projected from ${fmtDate(pv.as_of)}`;
+
+  const memberLi = (r) =>
+    `<li><span class="ticker">${r.ticker}</span><span class="wt">${fmtPct(r.weight)}</span></li>`;
+  const colList = (title, items) => `
+    <div>
+      <h4>${title}</h4>
+      ${items.length === 0 ? '<div class="none">none</div>'
+        : `<ul>${items.map(memberLi).join('')}</ul>`}
+    </div>`;
+
+  const horizon = (h, label, exact, subtitle) => `
+    <div class="horizon">
+      <div class="hz-head">
+        <span class="hz-when">${label} · ${fmtDate(h.target_month_end)}</span>
+        <span class="badge ${exact ? 'exact' : 'prov'}">${exact ? 'exact' : 'provisional'}</span>
+      </div>
+      <p class="hz-sub">${subtitle} · est. turnover ${fmtPct(h.turnover)}</p>
+      <div class="hz-cols">
+        ${colList(`Entering · ${h.entries.length}`, h.entries)}
+        ${colList(`Exiting · ${h.exits.length}`, h.exits)}
+      </div>
+    </div>`;
+
+  root.innerHTML =
+    horizon(pv.horizon1, 'Next', true,
+      'Locked in — reads only settled month-ends') +
+    horizon(pv.horizon2, 'Following', false,
+      'Depends on the in-progress month; will shift as it closes');
+}
+
 let currentSnap = null;
 let sortState = { key: 'weight', dir: 'desc' };
 
@@ -534,6 +603,7 @@ async function show(date) {
   try {
     currentSnap = await loadSnapshot(date);
     renderMetrics(currentSnap);
+    renderPreview(currentSnap);
     rerenderCharts();
     renderTable();
 
@@ -574,7 +644,76 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rer
 )
 
 
-def build_snapshot_dict(rebalance: pd.Timestamp, top_n: int, issuer_cap: float) -> dict:
+def _members_to_records(df: pd.DataFrame) -> list[dict]:
+    """Serialize an entries/exits frame from a PortfolioDiff."""
+    return [
+        {
+            "ticker": str(idx),
+            "sector": str(row.get("sector", "Unknown")),
+            "momentum_score": round(float(row["momentum_score"]), 4),
+            "weight": round(float(row["weight"]), 6),
+            "rank": int(row["rank"]),
+        }
+        for idx, row in df.iterrows()
+    ]
+
+
+def _moves_to_records(df: pd.DataFrame, limit: int) -> list[dict]:
+    return [
+        {
+            "ticker": str(idx),
+            "weight_now": round(float(row["weight_now"]), 6),
+            "weight_next": round(float(row["weight_next"]), 6),
+            "delta_weight": round(float(row["delta_weight"]), 6),
+            "delta_rank": int(row["delta_rank"]),
+        }
+        for idx, row in df.head(limit).iterrows()
+    ]
+
+
+def _horizon_block(d, exact: bool) -> dict:
+    return {
+        "target_month_end": d.target_month_end.strftime("%Y-%m-%d"),
+        "exact": exact,
+        "turnover": round(float(d.turnover), 6),
+        "entries": _members_to_records(d.entries),
+        "exits": _members_to_records(d.exits),
+        "moves": _moves_to_records(d.moves, 8),
+    }
+
+
+def build_preview_block(
+    current, rebalance: pd.Timestamp, top_n: int, issuer_cap: float
+) -> dict:
+    """Two-horizon next-rebalance projection.
+
+    Horizon 1 (this month-end) is EXACT — it reads only settled month-ends.
+    Horizon 2 (next month-end) is PROVISIONAL — it depends on the in-progress
+    month's close and firms up as the month proceeds.
+    """
+    common = dict(
+        universe_name="sp500",
+        top_n=top_n,
+        issuer_cap=issuer_cap or None,
+        ad_hoc=False,
+        use_cache=True,
+        preview=True,
+    )
+    h1 = run_snapshot(rebalance, preview_months_ahead=1, **common)
+    h2 = run_snapshot(rebalance, preview_months_ahead=2, **common)
+    return {
+        "as_of": current.date.strftime("%Y-%m-%d"),
+        "horizon1": _horizon_block(diff_snapshots(current, h1), exact=True),
+        "horizon2": _horizon_block(diff_snapshots(h1, h2), exact=False),
+    }
+
+
+def build_snapshot_dict(
+    rebalance: pd.Timestamp,
+    top_n: int,
+    issuer_cap: float,
+    with_preview: bool = True,
+) -> dict:
     snap = run_snapshot(
         rebalance,
         universe_name="sp500",
@@ -596,7 +735,7 @@ def build_snapshot_dict(rebalance: pd.Timestamp, top_n: int, issuer_cap: float) 
         }
         for idx, row in portfolio.iterrows()
     ]
-    return {
+    out = {
         "date": snap.date.strftime("%Y-%m-%d"),
         "generated_at": snap.generated_at.isoformat(timespec="seconds"),
         "params": snap.params,
@@ -606,6 +745,9 @@ def build_snapshot_dict(rebalance: pd.Timestamp, top_n: int, issuer_cap: float) 
         "portfolio": portfolio_records,
         "z_winsorized": snap.z_winsorized.astype(float).round(4).tolist(),
     }
+    if with_preview:
+        out["preview"] = build_preview_block(snap, rebalance, top_n, issuer_cap)
+    return out
 
 
 def write_snapshot(snapshot: dict) -> Path:
@@ -644,6 +786,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--date", default=None, help="YYYY-MM-DD; defaults to today (UTC).")
     p.add_argument("--top-n", type=int, default=100)
     p.add_argument("--issuer-cap", type=float, default=0.05)
+    p.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="Skip the two-horizon next-rebalance projection (faster).",
+    )
     args = p.parse_args(argv)
 
     rebalance = (
@@ -651,7 +798,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.date
         else pd.Timestamp(datetime.now(timezone.utc).date())
     )
-    snapshot = build_snapshot_dict(rebalance, args.top_n, args.issuer_cap)
+    snapshot = build_snapshot_dict(
+        rebalance, args.top_n, args.issuer_cap, with_preview=not args.no_preview
+    )
     snap_path = write_snapshot(snapshot)
     dates = write_index()
     html_path = write_html(dates, snapshot["date"])

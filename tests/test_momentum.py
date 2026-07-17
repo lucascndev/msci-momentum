@@ -9,7 +9,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from msci_momentum.data import month_end_closes_at_offset
+from msci_momentum.data import (
+    month_end_closes_at_offset,
+    project_monthly_to_month_end,
+)
 from msci_momentum.momentum import (
     MomentumInputs,
     _msci_score_from_z,
@@ -219,3 +222,78 @@ def test_month_end_closes_at_offset_returns_nan_when_short():
     rb = pd.Timestamp("2025-05-31")
     p13 = month_end_closes_at_offset(monthly, rb, 13)
     assert np.isnan(p13["X"])
+
+
+# ---------- next-rebalance preview projection ----------
+
+
+def _monthly_18():
+    idx = pd.date_range("2025-01-31", periods=18, freq="ME")  # ...through 2026-06-30
+    return pd.DataFrame({"X": np.arange(100, 118, dtype=float)}, index=idx)
+
+
+def test_project_targets_current_month_end():
+    monthly = _monthly_18()
+    _, target = project_monthly_to_month_end(monthly, pd.Timestamp("2026-07-20"))
+    assert target == pd.Timestamp("2026-07-31")
+
+
+def test_project_advances_lookback_one_month():
+    """Preview anchored at the month-end shifts each of P1/P7/P13 forward one row."""
+    monthly = _monthly_18()
+    as_of = pd.Timestamp("2026-07-20")
+
+    cur = {mb: month_end_closes_at_offset(monthly, as_of, mb)["X"] for mb in (1, 7, 13)}
+    aug, target = project_monthly_to_month_end(monthly, as_of)
+    prev = {mb: month_end_closes_at_offset(aug, target, mb)["X"] for mb in (1, 7, 13)}
+
+    for mb in (1, 7, 13):
+        assert prev[mb] == cur[mb] + 1  # values increment by 1 per month-end
+
+
+def test_project_value_is_irrelevant_to_lookback():
+    """The appended row sits in the unused T-0 slot: its value never feeds P1/P7/P13.
+
+    This is why the projected momentum is EXACT rather than a live proxy.
+    """
+    monthly = _monthly_18()
+    as_of = pd.Timestamp("2026-07-20")
+
+    def lookbacks(proxy):
+        lc = pd.Series({"X": proxy})
+        aug, target = project_monthly_to_month_end(monthly, as_of, latest_close=lc)
+        return tuple(
+            month_end_closes_at_offset(aug, target, mb)["X"] for mb in (1, 7, 13)
+        )
+
+    assert lookbacks(117.0) == lookbacks(999.0)
+
+
+def test_project_horizon2_targets_next_month_and_reads_proxy():
+    """Horizon 2 anchors on the next month-end; its P_{T-1} IS the proxy (provisional)."""
+    monthly = _monthly_18()
+    as_of = pd.Timestamp("2026-07-20")
+
+    def p1(proxy):
+        aug, target = project_monthly_to_month_end(
+            monthly, as_of, latest_close=pd.Series({"X": proxy}), months_ahead=2
+        )
+        assert target == pd.Timestamp("2026-08-31")
+        return month_end_closes_at_offset(aug, target, 1)["X"]
+
+    # Unlike horizon 1, the proxy value flows straight into P_{T-1}.
+    assert p1(117.0) == 117.0
+    assert p1(999.0) == 999.0
+
+
+def test_project_drops_partial_current_month_bar():
+    """A partial current-month bar is replaced, not duplicated, by the placeholder."""
+    monthly = _monthly_18()
+    # Add a stray partial July bar as yfinance might emit (indexed mid-month).
+    partial = pd.DataFrame({"X": [200.0]}, index=[pd.Timestamp("2026-07-01")])
+    monthly = pd.concat([monthly, partial]).sort_index()
+
+    aug, target = project_monthly_to_month_end(monthly, pd.Timestamp("2026-07-20"))
+    july_rows = aug.loc[aug.index >= pd.Timestamp("2026-07-01")]
+    assert len(july_rows) == 1
+    assert july_rows.index[0] == target

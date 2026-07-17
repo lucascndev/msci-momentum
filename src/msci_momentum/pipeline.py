@@ -38,6 +38,14 @@ class Snapshot:
     portfolio: pd.DataFrame   # indexed by ticker; cols include sector, issuer
     scores: pd.DataFrame      # full scoring output (incl. non-selected names)
     z_winsorized: pd.Series   # cross-section, eligible only
+    anchor_date: pd.Timestamp = None  # month-end the price lookback anchors on
+    is_preview: bool = False  # True for a projected future-rebalance snapshot
+    preview_months_ahead: int = 0  # 0=live, 1=exact next rebalance, 2=provisional
+
+    @property
+    def provisional(self) -> bool:
+        """True when the momentum ranking depends on the in-progress month."""
+        return self.preview_months_ahead >= 2
 
 
 def run_snapshot(
@@ -49,6 +57,8 @@ def run_snapshot(
     ad_hoc: bool = False,
     use_cache: bool = True,
     use_float: bool = True,
+    preview: bool = False,
+    preview_months_ahead: int = 1,
     min_eligibility_ratio: float = MIN_ELIGIBILITY_RATIO,
 ) -> Snapshot:
     rebalance = pd.Timestamp(rebalance_date)
@@ -56,7 +66,12 @@ def run_snapshot(
     tks = universe_tickers(members)
 
     inputs = build_inputs_for_universe(
-        tks, rebalance, country="USA", use_cache=use_cache
+        tks,
+        rebalance,
+        country="USA",
+        use_cache=use_cache,
+        preview=preview,
+        preview_months_ahead=preview_months_ahead,
     )
     scores = compute_momentum_scores(inputs, use_only_6m=ad_hoc)
 
@@ -107,6 +122,8 @@ def run_snapshot(
             "issuer_cap": issuer_cap or 0.0,
             "ad_hoc": ad_hoc,
             "use_float": use_float,
+            "preview": preview,
+            "preview_months_ahead": preview_months_ahead if preview else 0,
         },
         universe_size=len(tks),
         eligible_size=int(len(eligible)),
@@ -114,4 +131,7 @@ def run_snapshot(
         portfolio=portfolio,
         scores=scores,
         z_winsorized=scores_e["z_winsorized"].dropna(),
+        anchor_date=inputs.anchor_date,
+        is_preview=inputs.is_preview,
+        preview_months_ahead=inputs.preview_months_ahead,
     )

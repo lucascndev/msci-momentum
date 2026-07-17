@@ -24,6 +24,7 @@ from msci_momentum.data import (
     fetch_monthly_closes,
     fetch_weekly_closes,
     month_end_closes_at_offset,
+    project_monthly_to_month_end,
 )
 from msci_momentum.risk_free import horizon_rate
 
@@ -38,6 +39,9 @@ class MomentumInputs:
     sigma_annual: pd.Series  # annualized stdev of weekly local returns over 3y
     rf_6m: float             # 6-month risk-free rate (decimal)
     rf_12m: float            # 12-month risk-free rate (decimal)
+    anchor_date: pd.Timestamp | None = None  # month-end the 1/7/13 lookback anchors on
+    is_preview: bool = False  # True when anchored on a projected future month-end
+    preview_months_ahead: int = 0  # 0=live, 1=exact next rebalance, 2=provisional
 
 
 def annualized_weekly_volatility(weekly_closes: pd.DataFrame) -> pd.Series:
@@ -126,18 +130,41 @@ def build_inputs_for_universe(
     rebalance_date: pd.Timestamp,
     country: str = "USA",
     use_cache: bool = True,
+    preview: bool = False,
+    preview_months_ahead: int = 1,
 ) -> MomentumInputs:
-    """Fetch all data and assemble MomentumInputs for ``tickers`` at T."""
+    """Fetch all data and assemble MomentumInputs for ``tickers`` at T.
+
+    When ``preview`` is set, the lookback anchors on a future month-end so the
+    caller can see an upcoming rebalance. ``preview_months_ahead`` selects the
+    horizon:
+
+      * 1 -> the imminent rebalance (this month-end). Price momentum is EXACT:
+        P_{T-1}/P_{T-7}/P_{T-13} are all already-settled prior month-ends; the
+        current month's own close sits in the unused T-0 slot.
+      * 2 -> the rebalance after that. P_{T-1} is the *current* in-progress
+        month-end, proxied by the latest close, so this projection is
+        provisional and firms up as the month closes.
+
+    Risk-free and volatility inputs are always taken at the as-of date.
+    """
+    rebalance_date = pd.Timestamp(rebalance_date)
     monthly = fetch_monthly_closes(tickers, rebalance_date, use_cache=use_cache)
     weekly = fetch_weekly_closes(tickers, rebalance_date, use_cache=use_cache)
 
-    p1 = month_end_closes_at_offset(monthly, rebalance_date, 1)
-    p7 = month_end_closes_at_offset(monthly, rebalance_date, 7)
-    p13 = month_end_closes_at_offset(monthly, rebalance_date, 13)
+    anchor = rebalance_date
+    if preview:
+        monthly, anchor = project_monthly_to_month_end(
+            monthly, rebalance_date, months_ahead=preview_months_ahead
+        )
+
+    p1 = month_end_closes_at_offset(monthly, anchor, 1)
+    p7 = month_end_closes_at_offset(monthly, anchor, 7)
+    p13 = month_end_closes_at_offset(monthly, anchor, 13)
     sigma = annualized_weekly_volatility(weekly)
 
-    rf_6m = horizon_rate(country, pd.Timestamp(rebalance_date), 6)
-    rf_12m = horizon_rate(country, pd.Timestamp(rebalance_date), 12)
+    rf_6m = horizon_rate(country, rebalance_date, 6)
+    rf_12m = horizon_rate(country, rebalance_date, 12)
 
     return MomentumInputs(
         p_t_minus_1=p1,
@@ -146,4 +173,7 @@ def build_inputs_for_universe(
         sigma_annual=sigma,
         rf_6m=rf_6m,
         rf_12m=rf_12m,
+        anchor_date=anchor,
+        is_preview=preview,
+        preview_months_ahead=preview_months_ahead if preview else 0,
     )
